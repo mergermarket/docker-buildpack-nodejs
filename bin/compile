@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+
+if [ -f $1/.heroku_config ]; then
+  echo "=====> Loading heroku config from $1/.heroku_config"
+  source $1/.heroku_config
+fi
+
+build_dir=$1$NODE_WORKING_DIRECTORY
+echo "=====> build_dir is $build_dir"
+
+cache_basedir=$2
+bp_dir=$(cd $(dirname $0); cd ..; pwd)
+stable_version="0.10.24"
+
+source $bp_dir/bin/common.sh
+
+# Output npm debug info on error
+trap cat_npm_debug_log ERR
+
+# Bootstrap the build process with latest stable version of node
+# We'll use it to parse package.json and do semver detection
+status "Bootstrapping node"
+download_and_install_node $stable_version
+
+# Is a node version specified in package.json?
+# https://github.com/trentm/json
+requested_version=$(cat $build_dir/package.json | $bp_dir/vendor/json engines.node)
+
+# Give a warning if engines.node is unspecified
+if ! test $requested_version; then
+  node_version=$stable_version
+  echo
+  echo "WARNING: No node version specified in package.json, see:" | indent
+  echo "https://devcenter.heroku.com/articles/nodejs-support#versions" | indent
+  echo
+  status "Defaulting to latest stable node, v$stable_version"
+
+else
+  # Does the already-downloaded stable version of node satisfy the requested version?
+  default_satisfies=$($bp_dir/vendor/semver/bin/semver -v "$stable_version" -r "$requested_version" || echo "")
+
+  if test $default_satisfies; then
+    status "Latest stable node v$stable_version satisfies engines.node: $requested_version"
+    node_version=$stable_version
+  else
+
+    # Fetch all versions of node from nodejs.org/dist and format them into
+    # a string that the semver binary will appreciate.
+    # e.g. semver -v "0.10.0" -v "0.10.1" -v "0.10.2" -r ">0.8"
+    # See https://github.com/isaacs/node-semver/blob/master/bin/semver
+    args=""
+    for version in $(query_all_versions); do args="${args} -v \"${version}\""; done
+    args="${args} -r \"${requested_version}\""
+
+    # Find all versions that satisfy.
+    satisfying_versions=$(eval $bp_dir/vendor/semver/bin/semver ${args} || echo "")
+
+    # Use the latest one.
+    node_version=$(echo "$satisfying_versions" | tail -n 1)
+
+    # Bail if no matching version was found
+    if ! test $node_version; then
+      error "node ${requested_version} not found among available versions on nodejs.org/dist"
+    fi
+  fi
+fi
+
+# Run subsequent node/npm commands from the build path
+cd $build_dir
+
+# Configure cache directory
+package_checksum=$(cat $build_dir/package.json | md5sum | awk '{print $1}')
+cache_dir="$cache_basedir/$node_version/$package_checksum"
+
+# Restore from cache if node and package.json haven't changed
+if test -d $cache_dir; then
+  status "package.json and node version unchanged since last build"
+  status "Restoring node v$node_version and node_modules from cache"
+  test -d $cache_dir/node_modules && cp -r $cache_dir/node_modules $build_dir/
+  cp -r $cache_dir/vendor/node $build_dir/vendor/
+else
+
+  if [ $stable_version != $node_version ]; then
+    status "Downloading and installing node v$node_version"
+    download_and_install_node $node_version
+  fi
+
+  status "Rebuilding dependencies"
+  npm rebuild | indent
+
+  status "Installing dependencies"
+  if [ -n "$NPM_COMMAND" ]; then
+    eval $NPM_COMMAND | indent
+    rc=$?
+  else
+    npm install --production | indent
+    rc=$?
+  fi
+
+  if [ $rc != 0 ]; then
+    exit $rc
+  fi
+
+  # make sure that grunt, grunt-cli, and bower are installed locally
+  status "Install grunt-cli, grunt, and bower dependencies"
+  npm install grunt-cli
+  npm install grunt
+  npm install bower
+
+  status "Caching node and node_modules for future builds"
+  rm -rf $cache_dir
+  mkdir -p $cache_dir
+  mkdir -p $cache_dir/vendor
+  test -d $build_dir/node_modules && cp -r $build_dir/node_modules $cache_dir/
+  cp -r $build_dir/vendor/node $cache_dir/vendor/
+fi
+
+# Update the PATH
+status "Building runtime environment"
+mkdir -p $build_dir/.profile.d
+echo "export PATH=\"\$HOME/vendor/node/bin:$HOME/bin:\$HOME/node_modules/.bin:\$PATH\"" > $build_dir/.profile.d/nodejs.sh
+
+# install compass
+status "Installing Compass"
+export GEM_HOME=$cache_basedir/ruby/.gem/ruby/1.9.1
+PATH="$GEM_HOME/bin:$PATH"
+if [ ! -f $GEM_HOME/bin/compass ]; then
+  mkdir -p $cache_basedir/ruby
+  HOME="$cache_basedir/ruby" gem install compass --user-install --no-rdoc --no-ri
+fi
+
+# install bower components
+status "Installing bower components"
+$build_dir/node_modules/bower/bin/bower install
+
+# run grunt
+if [ -f $build_dir/grunt.js ] || [ -f $build_dir/Gruntfile.js ] || [ -f $build_dir/Gruntfile.coffee ]; then
+  status "Found Gruntfile, running grunt"
+
+  # Error if grunt is not found
+  if [ ! -f $build_dir/node_modules/.bin/grunt ]; then
+    echo "grunt binary not found. Make sure you add grunt-cli to your package.json!"
+    exit 1
+  else
+      
+    # Function that invokes grunt with params
+    function grunt () {
+      $build_dir/node_modules/.bin/grunt $1
+      rc=$?
+      
+      if [ $rc != 0 ]; then
+        exit 1
+      fi   
+      return $rc
+    }
+    
+    if [ -n "$GRUNT_COMMAND" ]; then
+      echo "Executing grunt command: $GRUNT_COMMAND"
+      eval $GRUNT_COMMAND | indent
+      rc=$?
+    else
+      echo "Executing grunt command: grunt heroku"
+      $build_dir/node_modules/.bin/grunt heroku | indent
+      rc=$?
+    fi
+    
+
+    if [ $rc != 0 ]; then
+      exit $rc
+    fi     
+    
+  fi
+
+else
+status "No Gruntfile (grunt.js, Gruntfile.js, Gruntfile.coffee) found"
+fi

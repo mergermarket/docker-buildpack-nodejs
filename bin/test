@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# See CONTRIBUTING.md for info on running these tests.
+
+testDetectWithPackageJson() {
+  detect "package-json-stable-version"
+  assertCaptured "Node.js"
+  assertCapturedSuccess
+}
+
+testDetectWithoutPackageJson() {
+  detect "no-package-json"
+  assertCapturedError 1 ""
+}
+
+testPackageJsonWithoutVersion() {
+  compile "package-json-noversion"
+  assertCaptured "WARNING: No node version specified"
+  assertCaptured "Defaulting to latest stable node"
+  assertCapturedSuccess
+}
+
+testPackageJsonWithStableVersion() {
+  compile "package-json-stable-version"
+  assertNotCaptured "WARNING: No node version specified"
+  assertCaptured "satisfies engines.node"
+  assertCapturedSuccess
+}
+
+testPackageJsonWithUnstableVersion() {
+  compile "package-json-unstable-version"
+  assertCaptured "Downloading and installing node v0.11"
+  assertCapturedSuccess
+}
+
+testPackageJsonWithInvalidVersion() {
+  compile "package-json-invalidversion"
+  assertCapturedError 1 "not found among available versions"
+}
+
+testProfileCreated() {
+  compile "package-json-stable-version"
+  assertCaptured "Building runtime environment"
+  assertFile "export PATH=\"\$HOME/vendor/node/bin:$HOME/bin:\$HOME/node_modules/.bin:\$PATH\"" ".profile.d/nodejs.sh"
+  assertCapturedSuccess
+}
+
+testNodeModulesCached() {
+  cache=$(mktmpdir)
+  compile "node-modules-caching" $cache
+  assertCaptured "Caching node"
+  assertEquals "1" "$(ls -1 $cache/0.10.18 | wc -l)"
+}
+
+# Pending
+
+# testNodeBinariesAddedToPath() {
+# }
+
+# testNodeModulesRestoredFromCache() {
+# }
+
+## utils ########################################
+
+pushd $(dirname 0) >/dev/null
+BASE=$(pwd)
+popd >/dev/null
+
+source ${BASE}/vendor/test-utils/test-utils
+
+mktmpdir() {
+  dir=$(mktemp -t testXXXXX)
+  rm -rf $dir
+  mkdir $dir
+  echo $dir
+}
+
+detect() {
+  capture ${BASE}/bin/detect ${BASE}/test/$1
+}
+
+COMPILE_DIR=""
+
+compile() {
+  COMPILE_DIR=$(mktmpdir)
+  cp -r ${BASE}/test/$1/* ${COMPILE_DIR}/
+  capture ${BASE}/bin/compile ${COMPILE_DIR} ${2:-$(mktmpdir)}
+}
+
+assertFile() {
+  assertEquals "$1" "$(cat ${COMPILE_DIR}/$2)"
+}
+
+source ${BASE}/vendor/shunit2/shunit2
