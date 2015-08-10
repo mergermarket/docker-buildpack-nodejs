@@ -93,7 +93,7 @@ else
     eval $NPM_COMMAND | indent
     rc=$?
   else
-    npm install --production | indent
+    npm install | indent
     rc=$?
   fi
 
@@ -119,15 +119,6 @@ fi
 status "Building runtime environment"
 mkdir -p $build_dir/.profile.d
 echo "export PATH=\"\$HOME/vendor/node/bin:$HOME/bin:\$HOME/node_modules/.bin:\$PATH\"" > $build_dir/.profile.d/nodejs.sh
-
-# install compass
-status "Installing Compass"
-export GEM_HOME=$cache_basedir/ruby/.gem/ruby/1.9.1
-PATH="$GEM_HOME/bin:$PATH"
-if [ ! -f $GEM_HOME/bin/compass ]; then
-  mkdir -p $cache_basedir/ruby
-  HOME="$cache_basedir/ruby" gem install compass --user-install --no-rdoc --no-ri
-fi
 
 # install bower components
 status "Installing bower components"
